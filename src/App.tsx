@@ -3,11 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { 
   Play, 
@@ -16,7 +11,6 @@ import {
   Shield, 
   Zap, 
   Trophy, 
-  Settings, 
   Info, 
   Gamepad2, 
   Skull, 
@@ -24,7 +18,9 @@ import {
   Timer,
   ChevronRight,
   ChevronLeft,
-  X
+  X,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -86,6 +82,105 @@ const DIFFICULTIES: Record<Difficulty, { spawnRate: number; speedMult: number; l
   INSANE: { spawnRate: 0.08, speedMult: 2.0, label: '疯狂' },
 };
 
+// --- Audio Manager ---
+class AudioManager {
+  private ctx: AudioContext | null = null;
+  private masterVolume: GainNode | null = null;
+  private isMuted: boolean = false;
+
+  private init() {
+    if (!this.ctx) {
+      this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      this.masterVolume = this.ctx.createGain();
+      this.masterVolume.connect(this.ctx.destination);
+      this.masterVolume.gain.value = 0.3;
+    }
+    if (this.ctx.state === 'suspended') {
+      this.ctx.resume();
+    }
+  }
+
+  setMute(mute: boolean) {
+    this.isMuted = mute;
+    if (this.masterVolume) {
+      this.masterVolume.gain.value = mute ? 0 : 0.3;
+    }
+  }
+
+  playShoot() {
+    this.init();
+    if (this.isMuted || !this.ctx || !this.masterVolume) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(800, this.ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(100, this.ctx.currentTime + 0.1);
+    gain.gain.setValueAtTime(0.2, this.ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.1);
+    osc.connect(gain);
+    gain.connect(this.masterVolume);
+    osc.start();
+    osc.stop(this.ctx.currentTime + 0.1);
+  }
+
+  playExplosion() {
+    this.init();
+    if (this.isMuted || !this.ctx || !this.masterVolume) return;
+    const noise = this.ctx.createBufferSource();
+    const bufferSize = this.ctx.sampleRate * 0.2;
+    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+    noise.buffer = buffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(1000, this.ctx.currentTime);
+    filter.frequency.exponentialRampToValueAtTime(10, this.ctx.currentTime + 0.2);
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.5, this.ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.2);
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterVolume);
+    noise.start();
+    noise.stop(this.ctx.currentTime + 0.2);
+  }
+
+  playPowerUp() {
+    this.init();
+    if (this.isMuted || !this.ctx || !this.masterVolume) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(400, this.ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(1200, this.ctx.currentTime + 0.2);
+    gain.gain.setValueAtTime(0.3, this.ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.2);
+    osc.connect(gain);
+    gain.connect(this.masterVolume);
+    osc.start();
+    osc.stop(this.ctx.currentTime + 0.2);
+  }
+
+  playHit() {
+    this.init();
+    if (this.isMuted || !this.ctx || !this.masterVolume) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(150, this.ctx.currentTime);
+    osc.frequency.linearRampToValueAtTime(50, this.ctx.currentTime + 0.3);
+    gain.gain.setValueAtTime(0.4, this.ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.01, this.ctx.currentTime + 0.3);
+    osc.connect(gain);
+    gain.connect(this.masterVolume);
+    osc.start();
+    osc.stop(this.ctx.currentTime + 0.3);
+  }
+}
+
+const audioManager = new AudioManager();
+
 // --- Game Logic ---
 
 export default function App() {
@@ -95,6 +190,7 @@ export default function App() {
   const [score, setScore] = useState(0);
   const [level, setLevel] = useState(1);
   const [lives, setLives] = useState(3);
+  const [isMuted, setIsMuted] = useState(false);
   const [achievements, setAchievements] = useState<Achievement[]>([
     { id: 'first_blood', name: '第一滴血', description: '击毁第一架敌机', icon: <Skull size={16} />, unlocked: false },
     { id: 'survivor', name: '生存者', description: '达到第5关', icon: <Timer size={16} />, unlocked: false },
@@ -116,6 +212,12 @@ export default function App() {
     keys: Record<string, boolean>;
     lastShot: number;
     frameCount: number;
+    images: {
+      player?: HTMLImageElement;
+      enemyBasic?: HTMLImageElement;
+      enemyFast?: HTMLImageElement;
+      enemyHeavy?: HTMLImageElement;
+    };
   }>({
     player: { x: 0, y: 0, width: 50, height: 50, speed: 6, color: '#00ffff', invulnerable: 0, shield: false, tripleShot: 0 },
     bullets: [],
@@ -126,17 +228,27 @@ export default function App() {
     keys: {},
     lastShot: 0,
     frameCount: 0,
+    images: {},
   });
 
-  // Load Player Ship Image
+  // Load Images
   useEffect(() => {
-    const img = new Image();
-    // 你可以在这里替换为你自己的图片 URL
-    // 例如: img.src = '/ship.png'; (如果你把图片放在 public 文件夹下)
-    img.src = 'https://raw.githubusercontent.com/lucide-react/lucide/main/icons/rocket.svg'; 
-    img.onload = () => {
-      engineRef.current.player.image = img;
+    const loadImage = (src: string) => {
+      const img = new Image();
+      img.src = src;
+      return img;
     };
+
+    // Note: When running locally, place images in the 'public' folder
+    const playerImg = loadImage('https://raw.githubusercontent.com/lucide-react/lucide/main/icons/rocket.svg');
+    const enemyBasicImg = loadImage('https://raw.githubusercontent.com/lucide-react/lucide/main/icons/target.svg');
+    const enemyFastImg = loadImage('https://raw.githubusercontent.com/lucide-react/lucide/main/icons/zap.svg');
+    const enemyHeavyImg = loadImage('https://raw.githubusercontent.com/lucide-react/lucide/main/icons/shield-alert.svg');
+
+    playerImg.onload = () => { engineRef.current.player.image = playerImg; engineRef.current.images.player = playerImg; };
+    enemyBasicImg.onload = () => { engineRef.current.images.enemyBasic = enemyBasicImg; };
+    enemyFastImg.onload = () => { engineRef.current.images.enemyFast = enemyFastImg; };
+    enemyHeavyImg.onload = () => { engineRef.current.images.enemyHeavy = enemyHeavyImg; };
   }, []);
 
   const unlockAchievement = useCallback((id: string) => {
@@ -278,6 +390,7 @@ export default function App() {
     // Shooting
     if (engine.keys[' '] && Date.now() - engine.lastShot > 150) {
       const p = engine.player;
+      audioManager.playShoot();
       if (p.tripleShot > 0) {
         engine.bullets.push({ x: p.x + p.width/2 - 2, y: p.y, width: 4, height: 15, speed: 10, color: '#00ffff', damage: 1, angle: 0 });
         engine.bullets.push({ x: p.x + p.width/2 - 2, y: p.y, width: 4, height: 15, speed: 10, color: '#00ffff', damage: 1, angle: -0.2 });
@@ -310,7 +423,9 @@ export default function App() {
         if (engine.player.shield) {
           engine.player.shield = false;
           unlockAchievement('untouchable');
+          audioManager.playPowerUp();
         } else {
+          audioManager.playHit();
           setLives(l => {
             if (l <= 1) setGameState('GAMEOVER');
             return l - 1;
@@ -335,6 +450,7 @@ export default function App() {
           createExplosion(b.x, b.y, '#00ffff', 3);
 
           if (e.hp <= 0) {
+            audioManager.playExplosion();
             setScore(s => {
               const newScore = s + e.scoreValue;
               if (newScore >= 10000) unlockAchievement('ace');
@@ -350,7 +466,7 @@ export default function App() {
 
       if (e.y > canvas.height) {
         engine.enemies.splice(i, 1);
-        setScore(s => Math.max(0, s - 50)); // Penalty for escape
+        setScore(s => Math.max(0, s - 50));
       }
     });
 
@@ -362,8 +478,9 @@ export default function App() {
           p.y < engine.player.y + engine.player.height &&
           p.y + p.height > engine.player.y) {
         
+        audioManager.playPowerUp();
         unlockAchievement('power_up');
-        if (p.type === 'TRIPLE_SHOT') engine.player.tripleShot = 600; // 10 seconds at 60fps
+        if (p.type === 'TRIPLE_SHOT') engine.player.tripleShot = 600;
         if (p.type === 'SHIELD') engine.player.shield = true;
         
         engine.powerUps.splice(i, 1);
@@ -386,7 +503,7 @@ export default function App() {
         if (next === 5) unlockAchievement('survivor');
         return next;
       });
-      engine.enemies = []; // Clear screen on level up
+      engine.enemies = [];
     }
 
   }, [gameState, difficulty, score, level, spawnEnemy, spawnPowerUp, createExplosion, unlockAchievement]);
@@ -426,12 +543,10 @@ export default function App() {
       ctx.fillStyle = p.color;
       ctx.beginPath();
       if (p.type === 'TRIPLE_SHOT') {
-        // Triangle/Zap shape
         ctx.moveTo(p.x + p.width/2, p.y);
         ctx.lineTo(p.x + p.width, p.y + p.height);
         ctx.lineTo(p.x, p.y + p.height);
       } else {
-        // Circle/Shield shape
         ctx.arc(p.x + p.width/2, p.y + p.height/2, p.width/2, 0, Math.PI * 2);
       }
       ctx.fill();
@@ -455,25 +570,68 @@ export default function App() {
     engine.enemies.forEach(e => {
       ctx.shadowBlur = 15;
       ctx.shadowColor = e.color;
-      ctx.fillStyle = e.color;
       
+      let enemyImg = null;
+      if (e.type === 'BASIC') enemyImg = engine.images.enemyBasic;
+      if (e.type === 'FAST') enemyImg = engine.images.enemyFast;
+      if (e.type === 'HEAVY') enemyImg = engine.images.enemyHeavy;
+
+      if (enemyImg) {
+        ctx.drawImage(enemyImg, e.x, e.y, e.width, e.height);
+      } else {
+        ctx.save();
+        ctx.translate(e.x + e.width / 2, e.y + e.height / 2);
+        ctx.rotate(Math.PI); // Enemies face down
+
+        if (e.type === 'HEAVY') {
+          // Realistic Heavy Cruiser
+          ctx.fillStyle = '#444';
+          ctx.fillRect(-e.width/2, -e.height/2, e.width, e.height);
+          ctx.fillStyle = e.color;
+          ctx.fillRect(-e.width/2 + 5, -e.height/2 + 5, e.width - 10, e.height - 10);
+          // Cockpit/Bridge
+          ctx.fillStyle = '#00ffff';
+          ctx.fillRect(-5, -e.height/2 + 10, 10, 15);
+          // Side pods
+          ctx.fillStyle = '#333';
+          ctx.fillRect(-e.width/2 - 10, -10, 10, 20);
+          ctx.fillRect(e.width/2, -10, 10, 20);
+        } else if (e.type === 'FAST') {
+          // Sleek Interceptor
+          ctx.fillStyle = e.color;
+          ctx.beginPath();
+          ctx.moveTo(0, e.height/2);
+          ctx.lineTo(e.width/2, -e.height/2);
+          ctx.lineTo(0, -e.height/4);
+          ctx.lineTo(-e.width/2, -e.height/2);
+          ctx.closePath();
+          ctx.fill();
+          // Engine glow
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(-2, -e.height/2, 4, 5);
+        } else {
+          // Basic Scout
+          ctx.fillStyle = e.color;
+          ctx.beginPath();
+          ctx.moveTo(0, e.height/2);
+          ctx.lineTo(e.width/2, 0);
+          ctx.lineTo(e.width/4, -e.height/2);
+          ctx.lineTo(-e.width/4, -e.height/2);
+          ctx.lineTo(-e.width/2, 0);
+          ctx.closePath();
+          ctx.fill();
+          // Details
+          ctx.fillStyle = '#000';
+          ctx.fillRect(-2, 0, 4, 10);
+        }
+        ctx.restore();
+      }
+
       if (e.type === 'HEAVY') {
-        ctx.fillRect(e.x, e.y, e.width, e.height);
-        // HP bar
         ctx.fillStyle = '#333';
         ctx.fillRect(e.x, e.y - 10, e.width, 4);
         ctx.fillStyle = '#00ff00';
         ctx.fillRect(e.x, e.y - 10, (e.hp / e.maxHp) * e.width, 4);
-      } else if (e.type === 'FAST') {
-        ctx.beginPath();
-        ctx.moveTo(e.x + e.width/2, e.y + e.height);
-        ctx.lineTo(e.x + e.width, e.y);
-        ctx.lineTo(e.x, e.y);
-        ctx.fill();
-      } else {
-        ctx.beginPath();
-        ctx.arc(e.x + e.width/2, e.y + e.height/2, e.width/2, 0, Math.PI * 2);
-        ctx.fill();
       }
       ctx.shadowBlur = 0;
     });
@@ -485,21 +643,52 @@ export default function App() {
       ctx.shadowColor = p.color;
       
       if (p.image) {
-        // Draw Image
         ctx.drawImage(p.image, p.x, p.y, p.width, p.height);
       } else {
-        // Fallback to path-based ship
-        ctx.fillStyle = p.color;
+        // Detailed Realistic Player Ship
+        ctx.save();
+        ctx.translate(p.x + p.width / 2, p.y + p.height / 2);
+        
+        // Main Body (Fuselage)
+        const grad = ctx.createLinearGradient(0, -p.height/2, 0, p.height/2);
+        grad.addColorStop(0, '#fff');
+        grad.addColorStop(0.5, p.color);
+        grad.addColorStop(1, '#008888');
+        ctx.fillStyle = grad;
+        
         ctx.beginPath();
-        ctx.moveTo(p.x + p.width/2, p.y);
-        ctx.lineTo(p.x + p.width, p.y + p.height);
-        ctx.lineTo(p.x + p.width/2, p.y + p.height * 0.8);
-        ctx.lineTo(p.x, p.y + p.height);
+        ctx.moveTo(0, -p.height/2); // Nose
+        ctx.lineTo(p.width/4, p.height/4);
+        ctx.lineTo(0, p.height/2);
+        ctx.lineTo(-p.width/4, p.height/4);
         ctx.closePath();
         ctx.fill();
+
+        // Wings
+        ctx.fillStyle = '#444';
+        ctx.beginPath();
+        ctx.moveTo(-p.width/4, 0);
+        ctx.lineTo(-p.width/2, p.height/2);
+        ctx.lineTo(-p.width/4, p.height/3);
+        ctx.closePath();
+        ctx.fill();
+        
+        ctx.beginPath();
+        ctx.moveTo(p.width/4, 0);
+        ctx.lineTo(p.width/2, p.height/2);
+        ctx.lineTo(p.width/4, p.height/3);
+        ctx.closePath();
+        ctx.fill();
+
+        // Cockpit
+        ctx.fillStyle = 'rgba(0, 255, 255, 0.7)';
+        ctx.beginPath();
+        ctx.ellipse(0, -p.height/6, 5, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
       }
 
-      // Shield effect
       if (p.shield) {
         ctx.strokeStyle = '#0088ff';
         ctx.lineWidth = 2;
@@ -512,7 +701,6 @@ export default function App() {
         ctx.globalAlpha = 1.0;
       }
 
-      // Engine fire
       if (engine.frameCount % 4 < 2) {
         ctx.fillStyle = '#ff8800';
         ctx.beginPath();
@@ -574,9 +762,14 @@ export default function App() {
     setGameState('PLAYING');
   };
 
+  const toggleMute = () => {
+    const newMuted = !isMuted;
+    setIsMuted(newMuted);
+    audioManager.setMute(newMuted);
+  };
+
   return (
     <div className="relative w-full h-screen overflow-hidden bg-black font-sans text-white select-none">
-      {/* Canvas Layer */}
       <canvas 
         ref={canvasRef} 
         className="absolute inset-0 w-full h-full"
@@ -607,10 +800,8 @@ export default function App() {
         }}
       />
 
-      {/* UI Layer */}
       <div className="absolute inset-0 pointer-events-none scanline">
         
-        {/* HUD */}
         <AnimatePresence>
           {gameState === 'PLAYING' && (
             <motion.div 
@@ -648,12 +839,20 @@ export default function App() {
               </div>
 
               <div className="flex flex-col items-end gap-2">
-                <button 
-                  onClick={() => setGameState('PAUSED')}
-                  className="glass p-3 rounded-xl hover:bg-white/10 transition-colors"
-                >
-                  <Pause size={20} />
-                </button>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={toggleMute}
+                    className="glass p-3 rounded-xl hover:bg-white/10 transition-colors"
+                  >
+                    {isMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
+                  </button>
+                  <button 
+                    onClick={() => setGameState('PAUSED')}
+                    className="glass p-3 rounded-xl hover:bg-white/10 transition-colors"
+                  >
+                    <Pause size={20} />
+                  </button>
+                </div>
                 <div className="flex gap-2">
                   {engineRef.current.player.shield && (
                     <motion.div 
@@ -677,7 +876,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Start Screen */}
         <AnimatePresence>
           {gameState === 'START' && (
             <motion.div 
@@ -745,7 +943,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Pause Screen */}
         <AnimatePresence>
           {gameState === 'PAUSED' && (
             <motion.div 
@@ -775,7 +972,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Game Over Screen */}
         <AnimatePresence>
           {gameState === 'GAMEOVER' && (
             <motion.div 
@@ -835,7 +1031,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Achievement Popup */}
         <AnimatePresence>
           {activeAchievement && (
             <motion.div 
@@ -855,7 +1050,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Sidebar (Desktop) */}
         <div className="hidden lg:block absolute left-6 top-1/2 -translate-y-1/2 pointer-events-auto">
           <motion.div 
             animate={{ x: showSidebar ? 0 : -280 }}
